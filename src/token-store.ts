@@ -21,6 +21,7 @@ const TOKEN_DATA_VERSION = 4
 const LEGACY_TOKEN_DATA_VERSION = 1
 const EARLIER_TOKEN_DATA_VERSION = 2
 const PREVIOUS_TOKEN_DATA_VERSION = 3
+const MAX_HISTORY_ENTRIES = 100
 
 export interface Coordinates {
   longitude: number
@@ -98,6 +99,9 @@ export interface PowerUpReward {
 
 export class TokenStore {
   private tokens: Token[]
+  private undoStack: Token[][] = []
+  private redoStack: Token[][] = []
+  private readonly listeners = new Set<() => void>()
   private readonly storage: StorageLike
   private readonly storageKey: string
 
@@ -109,6 +113,43 @@ export class TokenStore {
 
   list(): Token[] {
     return this.tokens.map(cloneToken)
+  }
+
+  canUndo(): boolean {
+    return this.undoStack.length > 0
+  }
+
+  canRedo(): boolean {
+    return this.redoStack.length > 0
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+
+  undo(): boolean {
+    const previousTokens = this.undoStack.pop()
+    if (!previousTokens) {
+      return false
+    }
+
+    this.pushHistory(this.redoStack, this.tokens)
+    this.persist(previousTokens)
+    this.notify()
+    return true
+  }
+
+  redo(): boolean {
+    const nextTokens = this.redoStack.pop()
+    if (!nextTokens) {
+      return false
+    }
+
+    this.pushHistory(this.undoStack, this.tokens)
+    this.persist(nextTokens)
+    this.notify()
+    return true
   }
 
   create(
@@ -415,10 +456,6 @@ export class TokenStore {
       if (powerUp.type !== TokenType.PowerUp) {
         throw new Error('Only Power Up tokens can be collected')
       }
-      if (team.targetTokenId !== powerUp.id) {
-        throw new Error('Team can only collect its current target')
-      }
-
       collectionsByPowerUp.set(collection.powerUpId, collection)
       collectedPowerUpsByTeam.set(collection.teamId, [powerUp.name])
     }
@@ -599,9 +636,33 @@ export class TokenStore {
   }
 
   private commit(nextTokens: Token[]): void {
+    if (tokensEqual(this.tokens, nextTokens)) {
+      return
+    }
+
+    this.pushHistory(this.undoStack, this.tokens)
+    this.redoStack = []
+    this.persist(nextTokens)
+    this.notify()
+  }
+
+  private pushHistory(history: Token[][], tokens: readonly Token[]): void {
+    history.push(tokens.map(cloneToken))
+    if (history.length > MAX_HISTORY_ENTRIES) {
+      history.shift()
+    }
+  }
+
+  private persist(nextTokens: readonly Token[]): void {
     const serialized = JSON.stringify({ version: STORAGE_VERSION, tokens: nextTokens })
     this.storage.setItem(this.storageKey, serialized)
-    this.tokens = nextTokens
+    this.tokens = nextTokens.map(cloneToken)
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) {
+      listener()
+    }
   }
 }
 
@@ -887,6 +948,10 @@ function appendTrajectoryPoint(points: readonly TrajectoryPoint[], coordinates: 
 
 function coordinatesEqual(first: Coordinates, second: Coordinates): boolean {
   return first.longitude === second.longitude && first.latitude === second.latitude
+}
+
+function tokensEqual(first: readonly Token[], second: readonly Token[]): boolean {
+  return JSON.stringify(first) === JSON.stringify(second)
 }
 
 function cloneToken(token: Token): Token {

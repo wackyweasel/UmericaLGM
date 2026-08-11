@@ -8,9 +8,11 @@ import {
   Menu,
   Moon,
   Plus,
+  Redo2,
   RotateCcw,
   Sun,
   Trash2,
+  Undo2,
   Users,
   X,
   Zap,
@@ -29,10 +31,8 @@ import {
   shouldUsePowerUp,
 } from './power-up'
 import {
-  advanceAlongRoute,
   fetchTargetRoute,
   getRandomAdvanceDistance,
-  getStoppedTokenIds,
   getTargetRouteKey,
   resolveSimultaneousAdvances,
   resolveTeamCollisionOutcomes,
@@ -56,6 +56,13 @@ if (!app) {
 type Theme = 'light' | 'dark'
 
 const THEME_STORAGE_KEY = 'umericalgm.theme.v1'
+const MATCH_DAY_STORAGE_KEY = 'umericalgm.match-day.v1'
+const ELIMINATION_TIMELINE_STORAGE_KEY = 'umericalgm.elimination-timeline.v1'
+
+interface EliminationEvent {
+  day: number
+  loserNames: string[]
+}
 
 function readStoredTheme(): Theme {
   return window.localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light'
@@ -63,6 +70,47 @@ function readStoredTheme(): Theme {
 
 function applyTheme(theme: Theme): void {
   document.documentElement.dataset.theme = theme
+}
+
+function readStoredMatchDay(): number {
+  const storedDay = Number(window.localStorage.getItem(MATCH_DAY_STORAGE_KEY))
+  return Number.isSafeInteger(storedDay) && storedDay >= 0 ? storedDay : 0
+}
+
+function storeMatchDay(day: number): void {
+  window.localStorage.setItem(MATCH_DAY_STORAGE_KEY, String(day))
+}
+
+function readStoredEliminationEvents(): EliminationEvent[] {
+  const storedEvents = window.localStorage.getItem(ELIMINATION_TIMELINE_STORAGE_KEY)
+  if (!storedEvents) {
+    return []
+  }
+
+  try {
+    const events: unknown = JSON.parse(storedEvents)
+    if (!Array.isArray(events)) {
+      return []
+    }
+
+    return events.flatMap((event): EliminationEvent[] => {
+      if (!event || typeof event !== 'object') {
+        return []
+      }
+
+      const { day, loserNames } = event as Partial<EliminationEvent>
+      return typeof day === 'number' && Number.isSafeInteger(day) && day >= 0 &&
+        Array.isArray(loserNames) && loserNames.every((name) => typeof name === 'string')
+        ? [{ day, loserNames }]
+        : []
+    })
+  } catch {
+    return []
+  }
+}
+
+function storeEliminationEvents(events: readonly EliminationEvent[]): void {
+  window.localStorage.setItem(ELIMINATION_TIMELINE_STORAGE_KEY, JSON.stringify(events))
 }
 
 const initialTheme = readStoredTheme()
@@ -95,12 +143,35 @@ app.innerHTML = `
             </div>
           </div>
           <div class="panel-actions">
+            <div class="history-actions" aria-label="Edit history">
+              <button
+                id="undo-button"
+                class="panel-toggle history-button"
+                type="button"
+                aria-label="Undo"
+                title="Undo (Ctrl+Z)"
+                disabled
+              >
+                <i data-lucide="undo-2" aria-hidden="true"></i>
+              </button>
+              <button
+                id="redo-button"
+                class="panel-toggle history-button"
+                type="button"
+                aria-label="Redo"
+                title="Redo (Ctrl+Shift+Z)"
+                disabled
+              >
+                <i data-lucide="redo-2" aria-hidden="true"></i>
+              </button>
+            </div>
             <details id="data-menu" class="data-menu">
               <summary class="data-menu-trigger" aria-label="Open data menu" title="Data menu">
                 <i data-lucide="ellipsis" aria-hidden="true"></i>
                 <span class="sr-only">Data menu</span>
               </summary>
               <div class="data-menu-list">
+                <button id="new-match-button" type="button">New match</button>
                 <button id="export-data-button" type="button">Export tokens</button>
                 <button id="import-data-button" type="button">Import tokens</button>
                 <button id="erase-data-button" class="menu-danger" type="button">Erase local data</button>
@@ -137,6 +208,7 @@ app.innerHTML = `
               <p class="section-kicker">Map controls</p>
               <h2>Deploy &amp; advance</h2>
             </div>
+            <p class="day-counter" aria-live="polite"><span>Day</span><strong id="match-day">0</strong></p>
           </div>
 
           <form id="new-token-form" class="token-form" novalidate>
@@ -198,6 +270,12 @@ app.innerHTML = `
               <span>Advance teams</span>
             </button>
           </div>
+          <details class="elimination-timeline">
+            <summary class="elimination-timeline-toggle">
+              <span id="elimination-timeline-title" class="control-label">Elimination timeline</span>
+            </summary>
+            <ol id="elimination-timeline-list" class="elimination-timeline-list"></ol>
+          </details>
           <label class="visibility-toggle">
             <input id="hide-eliminated-toggle" name="hide-eliminated" type="checkbox" />
             <span>Hide eliminated tokens</span>
@@ -321,6 +399,21 @@ app.innerHTML = `
         </form>
       </dialog>
 
+      <dialog id="new-match-dialog" class="data-dialog" aria-labelledby="new-match-dialog-title">
+        <form id="new-match-form" class="data-dialog-form" novalidate>
+          <h2 id="new-match-dialog-title">New match</h2>
+          <label for="new-match-team-count">Teams to spawn</label>
+          <input id="new-match-team-count" type="number" min="0" max="100" step="1" value="4" required />
+          <label for="new-match-power-up-count">Power Ups to spawn</label>
+          <input id="new-match-power-up-count" type="number" min="0" max="100" step="1" value="4" required />
+          <p id="new-match-error" class="form-message is-error" role="alert" hidden></p>
+          <div class="dialog-actions">
+            <button class="primary-button" type="submit">Start match</button>
+            <button id="cancel-new-match" class="text-button" type="button">Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
       <div id="live-status" class="sr-only" role="status" aria-live="polite"></div>
     </main>
   </div>
@@ -336,9 +429,11 @@ createIcons({
     Menu,
     Moon,
     Plus,
+    Redo2,
     RotateCcw,
     Sun,
     Trash2,
+    Undo2,
     Users,
     X,
     Zap,
@@ -360,9 +455,12 @@ const controlPanel = document.querySelector<HTMLElement>('#control-panel')!
 const themeToggleButton = document.querySelector<HTMLButtonElement>('#theme-toggle-button')!
 const toggleControlsButton = document.querySelector<HTMLButtonElement>('#toggle-controls')!
 const showControlsButton = document.querySelector<HTMLButtonElement>('#show-controls')!
+const undoButton = document.querySelector<HTMLButtonElement>('#undo-button')!
+const redoButton = document.querySelector<HTMLButtonElement>('#redo-button')!
 const dataMenu = document.querySelector<HTMLDetailsElement>('#data-menu')!
 const dataMenuTrigger = dataMenu.querySelector<HTMLElement>('.data-menu-trigger')!
 const dataMenuList = dataMenu.querySelector<HTMLElement>('.data-menu-list')!
+const newMatchButton = document.querySelector<HTMLButtonElement>('#new-match-button')!
 const exportDataButton = document.querySelector<HTMLButtonElement>('#export-data-button')!
 const importDataButton = document.querySelector<HTMLButtonElement>('#import-data-button')!
 const eraseDataButton = document.querySelector<HTMLButtonElement>('#erase-data-button')!
@@ -405,6 +503,14 @@ const importForm = document.querySelector<HTMLFormElement>('#import-form')!
 const importDataTextarea = document.querySelector<HTMLTextAreaElement>('#import-data')!
 const importError = document.querySelector<HTMLParagraphElement>('#import-error')!
 const cancelImportButton = document.querySelector<HTMLButtonElement>('#cancel-import')!
+const newMatchDialog = document.querySelector<HTMLDialogElement>('#new-match-dialog')!
+const newMatchForm = document.querySelector<HTMLFormElement>('#new-match-form')!
+const newMatchTeamCountInput = document.querySelector<HTMLInputElement>('#new-match-team-count')!
+const newMatchPowerUpCountInput = document.querySelector<HTMLInputElement>('#new-match-power-up-count')!
+const newMatchError = document.querySelector<HTMLParagraphElement>('#new-match-error')!
+const cancelNewMatchButton = document.querySelector<HTMLButtonElement>('#cancel-new-match')!
+const matchDay = document.querySelector<HTMLElement>('#match-day')!
+const eliminationTimelineList = document.querySelector<HTMLOListElement>('#elimination-timeline-list')!
 
 let selectedTokenId: string | null = null
 let renderedSelectedTokenId: string | null = null
@@ -412,23 +518,33 @@ let placementName = ''
 let isPlacementMode = false
 let isAdvancing = false
 let activeTheme = initialTheme
+let currentMatchDay = readStoredMatchDay()
+let eliminationEvents = readStoredEliminationEvents()
 let hideEliminatedTokens = hideEliminatedToggle.checked
 let targetRouteRequestKey: string | null = null
 let targetRouteAbortController: AbortController | null = null
 const targetRouteCache = new Map<string, readonly Coordinates[]>()
 
+tokenStore.subscribe(updateHistoryButtons)
+
 toggleControlsButton.addEventListener('click', () => setControlsCollapsed(true))
 showControlsButton.addEventListener('click', () => setControlsCollapsed(false))
 themeToggleButton.addEventListener('click', toggleTheme)
+undoButton.addEventListener('click', undoLastWrite)
+redoButton.addEventListener('click', redoLastWrite)
 dataMenu.addEventListener('toggle', positionDataMenu)
 window.addEventListener('resize', positionDataMenu)
 controlPanel.addEventListener('scroll', positionDataMenu)
+newMatchButton.addEventListener('click', openNewMatchDialog)
 exportDataButton.addEventListener('click', openExportDialog)
 importDataButton.addEventListener('click', openImportDialog)
 eraseDataButton.addEventListener('click', eraseLocalData)
 copyDataButton.addEventListener('click', copyExportData)
 cancelImportButton.addEventListener('click', () => importDialog.close())
 importDataTextarea.addEventListener('input', () => clearFormMessage(importError))
+cancelNewMatchButton.addEventListener('click', () => newMatchDialog.close())
+newMatchTeamCountInput.addEventListener('input', () => clearFormMessage(newMatchError))
+newMatchPowerUpCountInput.addEventListener('input', () => clearFormMessage(newMatchError))
 selectedTokenNameInput.addEventListener('input', saveSelectedTokenName)
 selectedTokenTypeInput.addEventListener('change', saveSelectedTokenType)
 selectedTokenNotesInput.addEventListener('input', saveSelectedTokenNotes)
@@ -448,6 +564,7 @@ hideEliminatedToggle.addEventListener('change', () => {
 clearTrajectoryButton.addEventListener('click', clearSelectedTrajectory)
 tokenNameInput.addEventListener('input', () => clearFormMessage(tokenNameError))
 updateThemeToggle(activeTheme)
+updateMatchDay()
 
 newTokenForm.addEventListener('submit', (event) => {
   event.preventDefault()
@@ -479,6 +596,20 @@ importForm.addEventListener('submit', (event) => {
   }
 })
 
+newMatchForm.addEventListener('submit', (event) => {
+  event.preventDefault()
+  clearFormMessage(newMatchError)
+
+  const teamCount = Number(newMatchTeamCountInput.value)
+  const powerUpCount = Number(newMatchPowerUpCountInput.value)
+  if (!Number.isSafeInteger(teamCount) || !Number.isSafeInteger(powerUpCount) || teamCount < 0 || powerUpCount < 0) {
+    showFormMessage(newMatchError, 'Enter whole numbers of zero or more.')
+    return
+  }
+
+  startNewMatch(teamCount, powerUpCount)
+})
+
 cancelPlacementButton.addEventListener('click', () => {
   setPlacementMode(false)
   tokenNameInput.focus()
@@ -488,6 +619,15 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && isPlacementMode) {
     setPlacementMode(false)
     tokenNameInput.focus()
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+    if (event.shiftKey) {
+      redoLastWrite()
+    } else {
+      undoLastWrite()
+    }
+    event.preventDefault()
   }
 })
 
@@ -693,17 +833,22 @@ async function advanceTeams(): Promise<void> {
     return
   }
 
+  currentMatchDay += 1
+  storeMatchDay(currentMatchDay)
+  updateMatchDay()
+
   const tokenById = new Map(snapshot.map((token) => [token.id, token]))
-  const stoppedTokenIds = getStoppedTokenIds(snapshot)
   const advancingTokenIds = new Set<string>()
   const advanceDistances = new Map<string, number>()
   const routeRequests = teamTokens.flatMap((teamToken) => {
     const targetToken = teamToken.targetTokenId ? tokenById.get(teamToken.targetTokenId) : undefined
+    const isAtTarget = targetToken &&
+      teamToken.longitude === targetToken.longitude &&
+      teamToken.latitude === targetToken.latitude
     if (
       !targetToken ||
-      stoppedTokenIds.has(teamToken.id) ||
       teamToken.speed <= 0 ||
-      (teamToken.longitude === targetToken.longitude && teamToken.latitude === targetToken.latitude)
+      (isAtTarget && targetToken.type !== TokenType.Team)
     ) {
       return []
     }
@@ -719,6 +864,7 @@ async function advanceTeams(): Promise<void> {
       key: getTargetRouteKey(teamToken, targetToken),
       source: teamToken,
       target: targetToken,
+      route: isAtTarget ? [teamToken, targetToken] : undefined,
     }]
   })
 
@@ -729,7 +875,11 @@ async function advanceTeams(): Promise<void> {
     const routes = new Map<string, readonly Coordinates[]>()
     let unavailableRoutes = 0
     const routeResults = await Promise.all(
-      routeRequests.map(async ({ key, source, target }) => {
+      routeRequests.map(async ({ key, source, target, route: inlineRoute }) => {
+        if (inlineRoute) {
+          return { key, route: inlineRoute, unavailable: false }
+        }
+
         const cachedRoute = targetRouteCache.get(key)
         if (cachedRoute) {
           return { key, route: cachedRoute, unavailable: false }
@@ -775,21 +925,26 @@ async function advanceTeams(): Promise<void> {
         continue
       }
 
-      const targetToken = tokenById.get(plan.targetTokenId)
-      if (!plan.reachedTarget || targetToken?.type !== TokenType.PowerUp) {
+      const powerUp = plan.encounterTokenIds
+        .map((tokenId) => tokenById.get(tokenId))
+        .find((token): token is Token => token?.type === TokenType.PowerUp)
+      if (!powerUp) {
         continue
       }
 
       collectedTeamIds.add(plan.tokenId)
-      if (!collectionsByPowerUp.has(targetToken.id)) {
-        collectionsByPowerUp.set(targetToken.id, { teamId: plan.tokenId, powerUpId: targetToken.id })
+      const teamAlreadyCollected = [...collectionsByPowerUp.values()]
+        .some((collection) => collection.teamId === plan.tokenId)
+      if (!collectionsByPowerUp.has(powerUp.id) && !teamAlreadyCollected) {
+        collectionsByPowerUp.set(powerUp.id, { teamId: plan.tokenId, powerUpId: powerUp.id })
       }
     }
 
-    const retargetTeamIds = new Set([...collisionResolution.winnerIds, ...collectedTeamIds])
+    const retargetTeamIds = new Set([...collisionResolution.retargetIds, ...collectedTeamIds])
     const eliminationRewards = collisionResolution.eliminations.flatMap(({ winnerId, loserIds }) =>
       loserIds.map(() => ({ teamId: winnerId, powerUpName: ELIMINATION_POWER_UP_NAME })),
     )
+    recordEliminations(collisionResolution.eliminations, snapshot)
     tokenStore.moveMany(
       plans.map((plan) => ({ id: plan.tokenId, coordinates: plan.coordinates })),
       [...collectionsByPowerUp.values()],
@@ -890,6 +1045,38 @@ function toggleTheme(): void {
   updateThemeToggle(activeTheme)
 }
 
+function undoLastWrite(): void {
+  if (isAdvancing || !tokenStore.undo()) {
+    return
+  }
+
+  restoreHistoryView('Undid the last write.')
+}
+
+function redoLastWrite(): void {
+  if (isAdvancing || !tokenStore.redo()) {
+    return
+  }
+
+  restoreHistoryView('Redid the last write.')
+}
+
+function restoreHistoryView(message: string): void {
+  targetRouteCache.clear()
+  if (selectedTokenId && !tokenStore.list().some((token) => token.id === selectedTokenId)) {
+    selectedTokenId = null
+  }
+  setPlacementMode(false)
+  render()
+  showActivity(message)
+  announce(message)
+}
+
+function updateHistoryButtons(): void {
+  undoButton.disabled = isAdvancing || !tokenStore.canUndo()
+  redoButton.disabled = isAdvancing || !tokenStore.canRedo()
+}
+
 function updateThemeToggle(theme: Theme): void {
   const isDark = theme === 'dark'
   const label = isDark ? 'Switch to light mode' : 'Switch to dark mode'
@@ -904,6 +1091,70 @@ function openExportDialog(): void {
   exportDataTextarea.value = tokenStore.exportData()
   exportStatus.hidden = true
   exportDialog.showModal()
+}
+
+function openNewMatchDialog(): void {
+  dataMenu.open = false
+  clearFormMessage(newMatchError)
+  newMatchDialog.showModal()
+  newMatchTeamCountInput.focus()
+  newMatchTeamCountInput.select()
+}
+
+function startNewMatch(teamCount: number, powerUpCount: number): void {
+  if (isAdvancing) {
+    return
+  }
+
+  try {
+    window.localStorage.clear()
+    tokenStore.clear()
+    clearStoredMapView()
+    currentMatchDay = 0
+    eliminationEvents = []
+    storeMatchDay(currentMatchDay)
+    setPlacementMode(false)
+    targetRouteCache.clear()
+    selectedTokenId = null
+
+    const seeds: { name: string; coordinates: Coordinates; type: TokenType }[] = []
+    const occupiedCoordinates: Coordinates[] = []
+    for (let index = 0; index < teamCount; index += 1) {
+      const city = selectPowerUpCity(CANADIAN_CITIES, occupiedCoordinates)
+      if (!city) {
+        break
+      }
+      seeds.push({
+        name: city.name,
+        coordinates: { longitude: city.longitude, latitude: city.latitude },
+        type: TokenType.Team,
+      })
+      occupiedCoordinates.push({ longitude: city.longitude, latitude: city.latitude })
+    }
+    for (let index = 0; index < powerUpCount; index += 1) {
+      const city = selectPowerUpCity(CANADIAN_CITIES, occupiedCoordinates)
+      if (!city) {
+        break
+      }
+      seeds.push({
+        name: `Power Up ${index + 1}`,
+        coordinates: { longitude: city.longitude, latitude: city.latitude },
+        type: TokenType.PowerUp,
+      })
+      occupiedCoordinates.push({ longitude: city.longitude, latitude: city.latitude })
+    }
+
+    const spawnedTokens = tokenStore.createMany(seeds)
+    selectedTokenId = spawnedTokens[0]?.id ?? null
+    newMatchDialog.close()
+    render()
+    updateMatchDay()
+    const totalTokens = spawnedTokens.length
+    showActivity(`New match started with ${totalTokens} token${totalTokens === 1 ? '' : 's'}.`)
+    announce(`New match started on day zero with ${teamCount} Team tokens and ${powerUpCount} Power Ups.`)
+  } catch (error) {
+    showFormMessage(newMatchError, getErrorMessage(error))
+  }
 }
 
 function positionDataMenu(): void {
@@ -924,9 +1175,13 @@ function positionDataMenu(): void {
     Math.max(viewportPadding, triggerRect.right - menuWidth),
     window.innerWidth - menuWidth - viewportPadding,
   )
+  const positioningContainer = dataMenuList.offsetParent
+  const positioningContainerRect = positioningContainer instanceof HTMLElement
+    ? positioningContainer.getBoundingClientRect()
+    : { top: 0, left: 0 }
 
-  dataMenuList.style.top = `${top}px`
-  dataMenuList.style.left = `${left}px`
+  dataMenuList.style.top = `${top - positioningContainerRect.top}px`
+  dataMenuList.style.left = `${left - positioningContainerRect.left}px`
 }
 
 function openImportDialog(): void {
@@ -962,6 +1217,56 @@ function eraseLocalData(): void {
     window.location.reload()
   } catch (error) {
     showActivity(getErrorMessage(error), true)
+  }
+}
+
+function updateMatchDay(): void {
+  matchDay.textContent = String(currentMatchDay)
+}
+
+function recordEliminations(
+  eliminations: readonly { winnerId: string; loserIds: readonly string[] }[],
+  tokens: readonly Token[],
+): void {
+  const tokenById = new Map(tokens.map((token) => [token.id, token]))
+  const events = eliminations.flatMap(({ loserIds }): EliminationEvent[] => {
+    const loserNames = loserIds
+      .map((teamId) => tokenById.get(teamId)?.name)
+      .filter((name): name is string => name !== undefined)
+    return loserNames.length > 0
+      ? [{ day: currentMatchDay, loserNames }]
+      : []
+  })
+
+  if (events.length === 0) {
+    return
+  }
+
+  eliminationEvents = [...events, ...eliminationEvents]
+  storeEliminationEvents(eliminationEvents)
+}
+
+function renderEliminationTimeline(): void {
+  eliminationTimelineList.replaceChildren()
+
+  if (eliminationEvents.length === 0) {
+    const emptyItem = document.createElement('li')
+    emptyItem.className = 'elimination-timeline-empty'
+    emptyItem.textContent = 'No eliminations yet.'
+    eliminationTimelineList.append(emptyItem)
+    return
+  }
+
+  for (const event of eliminationEvents) {
+    const item = document.createElement('li')
+    const day = document.createElement('span')
+    const details = document.createElement('span')
+    day.className = 'elimination-timeline-day'
+    details.className = 'elimination-timeline-details'
+    day.textContent = `Day ${event.day}`
+    details.textContent = `${event.loserNames.join(', ')} ${event.loserNames.length === 1 ? 'was' : 'were'} eliminated.`
+    item.append(day, details)
+    eliminationTimelineList.append(item)
   }
 }
 
@@ -1373,15 +1678,11 @@ async function advanceSelectedToken(): Promise<void> {
       return
     }
 
-    showActivity(`${selectedToken.name} is already at its target.`)
-    announce(`${selectedToken.name} is already at its target.`)
-    return
-  }
-
-  if (getStoppedTokenIds(tokens).has(selectedToken.id)) {
-    showActivity(`${selectedToken.name} is within 10 km of its target and is stopped.`)
-    announce(`${selectedToken.name} is within 10 km of its target and is stopped.`)
-    return
+    if (targetToken.type !== TokenType.Team) {
+      showActivity(`${selectedToken.name} is already at its target.`)
+      announce(`${selectedToken.name} is already at its target.`)
+      return
+    }
   }
 
   isAdvancing = true
@@ -1397,10 +1698,15 @@ async function advanceSelectedToken(): Promise<void> {
       return
     }
 
-    const advanceDistance = getRandomAdvanceDistance(selectedToken.speed)
+    const isAtTarget =
+      selectedToken.longitude === targetToken.longitude &&
+      selectedToken.latitude === targetToken.latitude
+    const advanceDistance = isAtTarget ? 0 : getRandomAdvanceDistance(selectedToken.speed)
 
     const routeKey = getTargetRouteKey(selectedToken, targetToken)
-    const route = targetRouteCache.get(routeKey) ?? (await fetchTargetRoute(selectedToken, targetToken))
+    const route = isAtTarget
+      ? [selectedToken, targetToken]
+      : targetRouteCache.get(routeKey) ?? (await fetchTargetRoute(selectedToken, targetToken))
     targetRouteCache.set(routeKey, route)
 
     const latestTokens = tokenStore.list()
@@ -1420,48 +1726,67 @@ async function advanceSelectedToken(): Promise<void> {
       return
     }
 
-    const advance = advanceAlongRoute(route, advanceDistance)
-    if (
-      advance.coordinates.longitude === latestToken.longitude &&
-      advance.coordinates.latitude === latestToken.latitude
-    ) {
+    const plans = resolveSimultaneousAdvances(
+      latestTokens,
+      new Map([[getTargetRouteKey(latestToken, latestTarget), route]]),
+      Math.random,
+      new Set([latestToken.id]),
+      new Map([[latestToken.id, advanceDistance]]),
+    )
+    const plan = plans[0]
+    if (!plan) {
       showActivity(`${latestToken.name} is already at its target.`)
       announce(`${latestToken.name} is already at its target.`)
       return
     }
 
-    if (advance.reachedTarget && latestTarget.type === TokenType.Team) {
-      const winnerId = Math.random() < 0.5 ? latestToken.id : latestTarget.id
-      const loserId = winnerId === latestToken.id ? latestTarget.id : latestToken.id
-      const winnerName = winnerId === latestToken.id ? latestToken.name : latestTarget.name
-      const loserName = loserId === latestToken.id ? latestToken.name : latestTarget.name
+    if (plan.collisionTokenIds.length > 0) {
+      const collisionTeamIds = [...new Set([latestToken.id, ...plan.collisionTokenIds])]
+      const winnerId = collisionTeamIds[Math.floor(Math.random() * collisionTeamIds.length)]!
+      const loserIds = collisionTeamIds.filter((teamId) => teamId !== winnerId)
+      const winner = latestTokens.find((token) => token.id === winnerId)!
+      const loserNames = loserIds
+        .map((teamId) => latestTokens.find((token) => token.id === teamId)?.name)
+        .filter((name): name is string => name !== undefined)
+      recordEliminations([{ winnerId, loserIds }], latestTokens)
       tokenStore.moveMany(
-        [{ id: latestToken.id, coordinates: advance.coordinates }],
+        [{ id: latestToken.id, coordinates: plan.coordinates }],
         [],
-        [loserId],
-        [{ teamId: winnerId, powerUpName: ELIMINATION_POWER_UP_NAME }],
+        loserIds,
+        loserIds.map(() => ({ teamId: winnerId, powerUpName: ELIMINATION_POWER_UP_NAME })),
       )
       const newTarget = retargetTeam(winnerId)
       render(false)
       const targetMessage = newTarget ? ` New target: ${newTarget.name}.` : ' No target available.'
-      showActivity(`${winnerName} won the collision. ${loserName} was eliminated.${targetMessage}`)
-      announce(`${winnerName} won the collision. ${loserName} was eliminated.${targetMessage}`)
+      const loserMessage = loserNames.length === 1
+        ? `${loserNames[0]} was eliminated.`
+        : `${loserNames.join(', ')} were eliminated.`
+      showActivity(`${winner.name} won the collision. ${loserMessage}${targetMessage}`)
+      announce(`${winner.name} won the collision. ${loserMessage}${targetMessage}`)
       return
     }
 
-    const reachedPowerUp = advance.reachedTarget && latestTarget.type === TokenType.PowerUp
+    const powerUp = plan.encounterTokenIds
+      .map((tokenId) => latestTokens.find((token) => token.id === tokenId))
+      .find((token): token is Token => token?.type === TokenType.PowerUp)
+    const reachedPowerUp = powerUp !== undefined
     const newTarget = reachedPowerUp
-      ? collectPowerUpForTeam(latestToken.id, latestTarget.id, advance.coordinates)
+      ? collectPowerUpForTeam(latestToken.id, powerUp.id, plan.coordinates)
       : undefined
     if (!reachedPowerUp) {
-      tokenStore.move(latestToken.id, advance.coordinates)
+      tokenStore.move(latestToken.id, plan.coordinates)
     }
-    const distanceLabel = Math.round(advance.distanceTravelledKilometers)
+    const distanceLabel = Math.round(plan.distanceTravelledKilometers)
     if (reachedPowerUp) {
       const targetMessage = newTarget ? ` New target: ${newTarget.name}.` : ' No target available.'
-      showActivity(`${latestToken.name} collected ${latestTarget.name}.${targetMessage}`)
-      announce(`${latestToken.name} collected ${latestTarget.name}.${targetMessage}`)
-    } else if (advance.reachedTarget) {
+      showActivity(`${latestToken.name} collected ${powerUp.name}.${targetMessage}`)
+      announce(`${latestToken.name} collected ${powerUp.name}.${targetMessage}`)
+    } else if (plan.encounterTokenIds.length > 0) {
+      const encounteredToken = latestTokens.find((token) => token.id === plan.encounterTokenIds[0])
+      const encounterMessage = encounteredToken ? ` Stopped near ${encounteredToken.name}.` : ''
+      showActivity(`${latestToken.name} advanced ${distanceLabel} km.${encounterMessage}`)
+      announce(`${latestToken.name} advanced ${distanceLabel} km.${encounterMessage}`)
+    } else if (plan.reachedTarget) {
       showActivity(`${latestToken.name} reached ${latestTarget.name}.`)
       announce(`${latestToken.name} reached ${latestTarget.name}.`)
     } else {
@@ -1515,6 +1840,8 @@ function render(syncSelectedEditor = true): void {
   const tokens = tokenStore.list()
   const selectedToken = getSelectedToken(tokens)
   advanceTeamsButton.disabled = isAdvancing || !tokens.some((token) => token.type === TokenType.Team)
+  updateHistoryButtons()
+  renderEliminationTimeline()
 
   if (!selectedToken) {
     selectedTokenId = null

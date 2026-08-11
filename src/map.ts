@@ -5,6 +5,7 @@ import {
   ScaleControl,
   setWorkerUrl,
   type GeoJSONSource,
+  type VectorTileSource,
 } from 'maplibre-gl'
 import maplibreWorker from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -22,6 +23,7 @@ const TRAJECTORY_SOURCE_ID = 'token-trajectories'
 const TRAJECTORY_LAYER_ID = 'token-trajectories-line'
 const TRAJECTORY_HIT_LAYER_ID = 'token-trajectories-hit'
 const LOW_ZOOM_ROAD_LAYER_ID = 'token-atlas-low-zoom-roads'
+const ROAD_SOURCE_LAYER = 'transportation'
 
 export type MapTheme = 'light' | 'dark'
 
@@ -63,6 +65,7 @@ export class TokenMap {
   private isStyleReady = false
   private trajectoryInteractionsBound = false
   private mapTheme: MapTheme
+  private vectorTileRequestVersion = 0
 
   constructor(container: HTMLElement, callbacks: TokenMapCallbacks, theme: MapTheme = 'light') {
     this.callbacks = callbacks
@@ -82,9 +85,12 @@ export class TokenMap {
     this.map.addControl(new NavigationControl({ visualizePitch: true }), 'top-right')
     this.map.addControl(new ScaleControl({ unit: 'metric' }), 'bottom-right')
     this.map.getCanvas().setAttribute('aria-label', 'Interactive world map')
-    const initializeStyleLayers = () => this.initializeStyleLayers()
-    this.map.on('load', initializeStyleLayers)
-    this.map.on('style.load', initializeStyleLayers)
+    this.map.on('style.load', () => this.initializeStyleLayers())
+    this.map.on('sourcedata', (event) => {
+      if (event.isSourceLoaded) {
+        this.initializeLowZoomRoadLayer()
+      }
+    })
     this.map.on('click', (event) => {
       if (this.isTrajectoryLineAtPoint(event.point)) {
         return
@@ -149,6 +155,7 @@ export class TokenMap {
   }
 
   private initializeStyleLayers(): void {
+    this.configureVectorTiles()
     this.enhanceDarkRoadLayers()
     this.enhanceDarkContextLayers()
     this.initializeLowZoomRoadLayer()
@@ -323,18 +330,17 @@ export class TokenMap {
 
   private initializeLowZoomRoadLayer(): void {
     const style = this.map.getStyle()
-    const roadSourceId = style.layers
-      .map((layer) => layer as unknown as Record<string, unknown>)
-      .find((layer) => (
-        layer['source-layer'] === 'transportation' &&
-        typeof layer.source === 'string'
-      ))?.source
-    if (typeof roadSourceId !== 'string' || this.map.getLayer(LOW_ZOOM_ROAD_LAYER_ID)) {
+    const roadSourceId = this.findRoadSourceId()
+    if (
+      typeof roadSourceId !== 'string' ||
+      !this.map.getSource(roadSourceId) ||
+      this.map.getLayer(LOW_ZOOM_ROAD_LAYER_ID)
+    ) {
       return
     }
 
     const firstSymbolLayerId = style.layers.find((layer) => layer.type === 'symbol')?.id
-  const isDarkTheme = this.mapTheme === 'dark'
+    const isDarkTheme = this.mapTheme === 'dark'
     this.map.addLayer({
       id: LOW_ZOOM_ROAD_LAYER_ID,
       type: 'line',
@@ -376,6 +382,50 @@ export class TokenMap {
         ],
       },
     }, firstSymbolLayerId)
+  }
+
+  private configureVectorTiles(): void {
+    const roadSourceId = this.findRoadSourceId()
+    if (!roadSourceId) {
+      return
+    }
+
+    const source = this.map.getSource(roadSourceId)
+    if (!source || source.type !== 'vector') {
+      return
+    }
+
+    const vectorSource = source as VectorTileSource
+    const tileJsonUrl = vectorSource.url
+    if (!tileJsonUrl) {
+      return
+    }
+
+    const requestVersion = ++this.vectorTileRequestVersion
+    void fetch(tileJsonUrl, { cache: 'no-store' })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(response.statusText)))
+      .then((tileJson: unknown) => {
+        if (!isTileJson(tileJson) || requestVersion !== this.vectorTileRequestVersion) {
+          return
+        }
+
+        const currentSource = this.map.getSource(roadSourceId)
+        if (currentSource !== vectorSource) {
+          return
+        }
+
+        vectorSource.setTiles(tileJson.tiles.map((url) => appendRequestVersion(url, requestVersion)))
+      })
+      .catch(() => undefined)
+  }
+
+  private findRoadSourceId(): string | undefined {
+    return this.map.getStyle().layers
+      .map((layer) => layer as unknown as Record<string, unknown>)
+      .find((layer) => (
+        layer['source-layer'] === ROAD_SOURCE_LAYER &&
+        typeof layer.source === 'string'
+      ))?.source as string | undefined
   }
 
   private renderTargetRoute(): void {
@@ -754,6 +804,14 @@ function isStoredMapView(value: unknown): value is MapViewState & { version: num
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function isTileJson(value: unknown): value is { tiles: string[] } {
+  return isRecord(value) && Array.isArray(value.tiles) && value.tiles.every((tile) => typeof tile === 'string')
+}
+
+function appendRequestVersion(url: string, version: number): string {
+  return `${url}${url.includes('?') ? '&' : '?'}map-request=${version}`
 }
 
 function normalizeLongitude(longitude: number): number {

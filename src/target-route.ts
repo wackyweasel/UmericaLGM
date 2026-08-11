@@ -4,6 +4,7 @@ const ROUTING_SERVICE_URL = 'https://router.project-osrm.org/route/v1/driving'
 const EARTH_RADIUS_KILOMETERS = 6371
 const MIN_ADVANCE_DISTANCE_FACTOR = 0.1
 const TARGET_STOP_DISTANCE_KILOMETERS = 10
+const COLLISION_MUTUAL_SURVIVAL_PROBABILITY = 0.5
 
 type AdvanceToken = Pick<
   Token,
@@ -59,7 +60,7 @@ export interface RouteAdvanceResult {
 }
 
 export function shouldAdvance(random = Math.random): boolean {
-  return random() < 0.5
+  return random() < 0.75
 }
 
 export function getRandomAdvanceDistance(speed: number, random = Math.random): number {
@@ -86,12 +87,14 @@ export interface SimultaneousAdvancePlan {
   coordinates: Coordinates
   distanceTravelledKilometers: number
   reachedTarget: boolean
+  encounterTokenIds: readonly string[]
   collisionTokenIds: readonly string[]
 }
 
 export interface TeamCollisionResolution {
   winnerIds: string[]
   loserIds: string[]
+  retargetIds: string[]
   eliminations: TeamElimination[]
 }
 
@@ -133,6 +136,7 @@ export function resolveTeamCollisionOutcomes(
   const visited = new Set<string>()
   const winnerIds: string[] = []
   const loserIds: string[] = []
+  const retargetIds: string[] = []
   const eliminations: TeamElimination[] = []
   for (const teamId of collisionNeighbors.keys()) {
     if (visited.has(teamId)) {
@@ -155,15 +159,21 @@ export function resolveTeamCollisionOutcomes(
       }
     }
 
+    if (random() < COLLISION_MUTUAL_SURVIVAL_PROBABILITY) {
+      retargetIds.push(...component)
+      continue
+    }
+
     const winnerIndex = Math.min(component.length - 1, Math.floor(random() * component.length))
     const winnerId = component[winnerIndex]!
     const componentLoserIds = component.filter((candidateId) => candidateId !== winnerId)
     winnerIds.push(winnerId)
     loserIds.push(...componentLoserIds)
+    retargetIds.push(winnerId)
     eliminations.push({ winnerId, loserIds: componentLoserIds })
   }
 
-  return { winnerIds, loserIds, eliminations }
+  return { winnerIds, loserIds, retargetIds, eliminations }
 }
 
 interface AdvanceCandidate {
@@ -172,6 +182,7 @@ interface AdvanceCandidate {
   motion: RouteMotion
   requestedDistanceKilometers: number
   stopTime: number | null
+  encounterTokenIds: Set<string>
   collisionTokenIds: Set<string>
 }
 
@@ -189,11 +200,10 @@ export function resolveSimultaneousAdvances(
   advanceDistances?: ReadonlyMap<string, number>,
 ): SimultaneousAdvancePlan[] {
   const tokenById = new Map(tokens.map((token) => [token.id, token]))
-  const stoppedTokenIds = getStoppedTokenIds(tokens, tokenById)
   const candidates: AdvanceCandidate[] = []
 
   for (const token of tokens) {
-    if (token.type !== TokenType.Team || stoppedTokenIds.has(token.id) || !token.targetTokenId) {
+    if (token.type !== TokenType.Team || !token.targetTokenId) {
       continue
     }
 
@@ -218,9 +228,13 @@ export function resolveSimultaneousAdvances(
       ?? getRandomAdvanceDistance(token.speed, random)
     const motion = createRouteMotion(route)
     const advance = advanceAlongMotion(motion, requestedDistanceKilometers)
+    const isImmediateTeamContact =
+      targetToken.type === TokenType.Team &&
+      greatCircleDistance(token, targetToken) <= TARGET_STOP_DISTANCE_KILOMETERS
     if (
       advance.coordinates.longitude === token.longitude &&
-      advance.coordinates.latitude === token.latitude
+      advance.coordinates.latitude === token.latitude &&
+      !isImmediateTeamContact
     ) {
       continue
     }
@@ -231,6 +245,7 @@ export function resolveSimultaneousAdvances(
       motion,
       requestedDistanceKilometers,
       stopTime: null,
+      encounterTokenIds: new Set(),
       collisionTokenIds: new Set(),
     })
   }
@@ -248,6 +263,7 @@ export function resolveSimultaneousAdvances(
       coordinates: advance.coordinates,
       distanceTravelledKilometers: advance.distanceTravelledKilometers,
       reachedTarget: advance.reachedTarget,
+      encounterTokenIds: [...candidate.encounterTokenIds],
       collisionTokenIds: [...candidate.collisionTokenIds],
     }
   })
@@ -258,9 +274,10 @@ function resolveStopCollisions(
   candidates: AdvanceCandidate[],
 ): void {
   const candidateById = new Map(candidates.map((candidate) => [candidate.tokenId, candidate]))
+  const activeTokens = [...tokenById.values()].filter((token) => token.type !== TokenType.Eliminated)
 
   while (true) {
-    let earliestCollision: { tokenId: string; targetTokenId: string; time: number } | null = null
+    let earliestEncounter: { tokenId: string; otherTokenId: string; time: number } | null = null
 
     for (const candidate of candidates) {
       if (candidate.stopTime !== null) {
@@ -268,45 +285,59 @@ function resolveStopCollisions(
       }
 
       const token = tokenById.get(candidate.tokenId)
-      const targetTokenId = token?.targetTokenId
-      const targetToken = targetTokenId ? tokenById.get(targetTokenId) : undefined
-      if (!token || !targetToken || targetToken.type === TokenType.PowerUp) {
+      if (!token) {
         continue
       }
 
-      const targetCandidate = candidateById.get(targetToken.id)
-      const collisionTime = findFirstStopTime(candidate, targetToken, targetCandidate)
-      if (
-        collisionTime === null ||
-        (earliestCollision !== null && collisionTime >= earliestCollision.time)
-      ) {
-        continue
-      }
+      for (const otherToken of activeTokens) {
+        if (otherToken.id === token.id) {
+          continue
+        }
 
-      earliestCollision = {
-        tokenId: candidate.tokenId,
-        targetTokenId: targetToken.id,
-        time: collisionTime,
+        const otherCandidate = candidateById.get(otherToken.id)
+        const allowInitialContact =
+          otherToken.type === TokenType.Team && token.targetTokenId === otherToken.id
+        const encounterTime = findFirstStopTime(
+          candidate,
+          otherToken,
+          otherCandidate,
+          allowInitialContact,
+        )
+        if (
+          encounterTime === null ||
+          (earliestEncounter !== null && encounterTime >= earliestEncounter.time)
+        ) {
+          continue
+        }
+
+        earliestEncounter = {
+          tokenId: candidate.tokenId,
+          otherTokenId: otherToken.id,
+          time: encounterTime,
+        }
       }
     }
 
-    if (!earliestCollision) {
+    if (!earliestEncounter) {
       return
     }
 
-    const movingCandidate = candidateById.get(earliestCollision.tokenId)
+    const movingCandidate = candidateById.get(earliestEncounter.tokenId)
     if (movingCandidate) {
-      movingCandidate.stopTime = earliestCollision.time
+      movingCandidate.stopTime = earliestEncounter.time
+      movingCandidate.encounterTokenIds.add(earliestEncounter.otherTokenId)
     }
 
-    const targetCandidate = candidateById.get(earliestCollision.targetTokenId)
-    const targetToken = tokenById.get(earliestCollision.targetTokenId)
+    const targetCandidate = candidateById.get(earliestEncounter.otherTokenId)
+    const targetToken = tokenById.get(earliestEncounter.otherTokenId)
     if (targetToken?.type === TokenType.Team) {
       movingCandidate?.collisionTokenIds.add(targetToken.id)
-      targetCandidate?.collisionTokenIds.add(earliestCollision.tokenId)
+      movingCandidate?.encounterTokenIds.add(targetToken.id)
+      targetCandidate?.collisionTokenIds.add(earliestEncounter.tokenId)
+      targetCandidate?.encounterTokenIds.add(earliestEncounter.tokenId)
     }
-    if (targetCandidate && (targetCandidate.stopTime === null || targetCandidate.stopTime > earliestCollision.time)) {
-      targetCandidate.stopTime = earliestCollision.time
+    if (targetCandidate && (targetCandidate.stopTime === null || targetCandidate.stopTime > earliestEncounter.time)) {
+      targetCandidate.stopTime = earliestEncounter.time
     }
   }
 }
@@ -315,6 +346,7 @@ function findFirstStopTime(
   movingCandidate: AdvanceCandidate,
   targetToken: AdvanceToken,
   targetCandidate: AdvanceCandidate | undefined,
+  allowInitialContact = false,
 ): number | null {
   const breakpoints = new Set<number>([0, 1])
   addMotionBreakpoints(breakpoints, movingCandidate)
@@ -336,8 +368,13 @@ function findFirstStopTime(
         getTargetPosition(targetToken, targetCandidate, time),
       )
 
-    if (distanceAt(intervalStart) <= TARGET_STOP_DISTANCE_KILOMETERS) {
-      return intervalStart
+    const distanceAtStart = distanceAt(intervalStart)
+    if (distanceAtStart <= TARGET_STOP_DISTANCE_KILOMETERS) {
+      if (intervalStart === 0 && allowInitialContact) {
+        return 0
+      }
+
+      continue
     }
 
     let closestTime = findClosestTime(
@@ -474,30 +511,6 @@ function findClosestTimeBySearch(
   return candidates.reduce((closestTime, time) =>
     distanceAt(time) < distanceAt(closestTime) ? time : closestTime,
   )
-}
-
-export function getStoppedTokenIds(
-  tokens: readonly AdvanceToken[],
-  tokenById = new Map(tokens.map((token) => [token.id, token])),
-): ReadonlySet<string> {
-  const stoppedTokenIds = new Set<string>()
-  for (const token of tokens) {
-    if (token.type !== TokenType.Team || !token.targetTokenId) {
-      continue
-    }
-
-    const targetToken = tokenById.get(token.targetTokenId)
-    if (
-      targetToken &&
-      targetToken.type !== TokenType.PowerUp &&
-      greatCircleDistance(token, targetToken) <= TARGET_STOP_DISTANCE_KILOMETERS
-    ) {
-      stoppedTokenIds.add(token.id)
-      stoppedTokenIds.add(targetToken.id)
-    }
-  }
-
-  return stoppedTokenIds
 }
 
 export function advanceAlongRoute(

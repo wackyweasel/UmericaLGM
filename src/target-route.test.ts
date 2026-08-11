@@ -4,7 +4,6 @@ import {
   fetchTargetRoute,
   getRandomAdvanceDistance,
   greatCircleDistance,
-  getStoppedTokenIds,
   getTargetRouteKey,
   resolveSimultaneousAdvances,
   resolveTeamCollisionOutcomes,
@@ -67,9 +66,9 @@ describe('Target road routing', () => {
     await expect(fetchTargetRoute(endpoints, target)).rejects.toThrow('No road route')
   })
 
-  it('uses a fixed 50% movement probability', () => {
-    expect(shouldAdvance(() => 0.49)).toBe(true)
-    expect(shouldAdvance(() => 0.5)).toBe(false)
+  it('uses a fixed 75% movement probability', () => {
+    expect(shouldAdvance(() => 0.74)).toBe(true)
+    expect(shouldAdvance(() => 0.75)).toBe(false)
     expect(getRandomAdvanceDistance(100, () => 0)).toBe(10)
     expect(getRandomAdvanceDistance(100, () => 1)).toBe(100)
   })
@@ -104,7 +103,7 @@ describe('Target road routing', () => {
     expect(plans[0]?.distanceTravelledKilometers).toBeCloseTo(10)
   })
 
-  it('allows a Team to reach a Power Up target', () => {
+  it('stops a Team within 10 km of a Power Up target', () => {
     const tokens = [
       {
         id: 'alpha',
@@ -135,9 +134,10 @@ describe('Target road routing', () => {
     expect(plans[0]).toMatchObject({
       tokenId: 'alpha',
       targetTokenId: 'power-up',
-      reachedTarget: true,
-      coordinates: tokens[1],
+      reachedTarget: false,
+      encounterTokenIds: ['power-up'],
     })
+    expect(greatCircleDistance(plans[0]!.coordinates, tokens[1]!)).toBeLessThanOrEqual(10.1)
   })
 
   it('moves along the route and stops at the target instead of overshooting', () => {
@@ -240,11 +240,60 @@ describe('Target road routing', () => {
     expect(resolveTeamCollisionOutcomes(plans, tokens, () => 0.99999)).toEqual({
       winnerIds: ['bravo'],
       loserIds: ['alpha'],
+      retargetIds: ['bravo'],
       eliminations: [{ winnerId: 'bravo', loserIds: ['alpha'] }],
     })
   })
 
-  it('stops both tokens when a Team is within 10 km of its target', () => {
+  it('lets every Team in a collision group survive half the time', () => {
+    const tokens = [
+      {
+        id: 'alpha',
+        type: TokenType.Team,
+        targetTokenId: 'bravo',
+        speed: 250,
+        longitude: -2,
+        latitude: 0,
+      },
+      {
+        id: 'bravo',
+        type: TokenType.Team,
+        targetTokenId: 'alpha',
+        speed: 250,
+        longitude: 2,
+        latitude: 0,
+      },
+    ] as const
+    const plans = [
+      {
+        tokenId: 'alpha',
+        targetTokenId: 'bravo',
+        coordinates: { longitude: -1, latitude: 0 },
+        distanceTravelledKilometers: 100,
+        reachedTarget: false,
+        encounterTokenIds: ['bravo'],
+        collisionTokenIds: ['bravo'],
+      },
+      {
+        tokenId: 'bravo',
+        targetTokenId: 'alpha',
+        coordinates: { longitude: 1, latitude: 0 },
+        distanceTravelledKilometers: 100,
+        reachedTarget: false,
+        encounterTokenIds: ['alpha'],
+        collisionTokenIds: ['alpha'],
+      },
+    ] as const
+
+    expect(resolveTeamCollisionOutcomes(plans, tokens, () => 0.49)).toEqual({
+      winnerIds: [],
+      loserIds: [],
+      retargetIds: ['alpha', 'bravo'],
+      eliminations: [],
+    })
+  })
+
+  it('does not pre-stop nearby Teams and still allows an immediate collision', () => {
     const tokens = [
       {
         id: 'alpha',
@@ -257,13 +306,55 @@ describe('Target road routing', () => {
       {
         id: 'bravo',
         type: TokenType.Team,
-        targetTokenId: 'charlie',
+        targetTokenId: 'alpha',
         speed: 250,
-        longitude: 0.05,
+        longitude: 0,
+        latitude: 0,
+      },
+    ] as const
+    const routes = new Map([
+      [getTargetRouteKey(tokens[0]!, tokens[1]!), [tokens[0]!, tokens[1]!]],
+      [getTargetRouteKey(tokens[1]!, tokens[0]!), [tokens[1]!, tokens[0]!]],
+    ])
+    const plans = resolveSimultaneousAdvances(
+      tokens,
+      routes,
+      () => 0,
+      new Set(['alpha', 'bravo']),
+      new Map([
+        ['alpha', 250],
+        ['bravo', 250],
+      ]),
+    )
+    expect(plans.map((plan) => plan.tokenId)).toEqual(['alpha', 'bravo'])
+    expect(plans[0]?.coordinates).toEqual(tokens[0])
+    expect(plans[1]?.coordinates).toEqual(tokens[1])
+    expect(plans[0]?.encounterTokenIds).toEqual(['bravo'])
+    expect(plans[1]?.encounterTokenIds).toEqual(['alpha'])
+    expect(plans[0]?.collisionTokenIds).toEqual(['bravo'])
+    expect(plans[1]?.collisionTokenIds).toEqual(['alpha'])
+  })
+
+  it('stops at a nearby Player during movement', () => {
+    const tokens = [
+      {
+        id: 'alpha',
+        type: TokenType.Team,
+        targetTokenId: 'power-up',
+        speed: 250,
+        longitude: 0,
         latitude: 0,
       },
       {
-        id: 'charlie',
+        id: 'player',
+        type: TokenType.Player,
+        targetTokenId: null,
+        speed: 250,
+        longitude: 0.5,
+        latitude: 0,
+      },
+      {
+        id: 'power-up',
         type: TokenType.PowerUp,
         targetTokenId: null,
         speed: 250,
@@ -272,7 +363,17 @@ describe('Target road routing', () => {
       },
     ] as const
 
-    expect([...getStoppedTokenIds(tokens)]).toEqual(['alpha', 'bravo'])
-    expect(resolveSimultaneousAdvances(tokens, new Map(), () => 0)).toEqual([])
+    const route = [tokens[0]!, { longitude: 0.5, latitude: 0 }, tokens[2]!]
+    const plans = resolveSimultaneousAdvances(
+      tokens,
+      new Map([[getTargetRouteKey(tokens[0]!, tokens[2]!), route]]),
+      () => 0,
+      new Set(['alpha']),
+      new Map([['alpha', 250]]),
+    )
+
+    expect(plans[0]?.encounterTokenIds).toEqual(['player'])
+    expect(plans[0]?.collisionTokenIds).toEqual([])
+    expect(greatCircleDistance(plans[0]!.coordinates, tokens[1]!)).toBeLessThanOrEqual(10.1)
   })
 })

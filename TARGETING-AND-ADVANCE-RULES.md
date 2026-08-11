@@ -86,8 +86,7 @@ A Team does not request a route or move when:
 - It has no valid target.
 - Its target cannot be found.
 - Its speed is zero.
-- It is already at its target coordinates.
-- It is already stopped within the target's 10 km stop range.
+- It is already at its target coordinates, unless that target is a Team that can be resolved as an immediate collision.
 
 ### 3. Movement Chance
 
@@ -124,29 +123,32 @@ The selected-token Advance plans and commits only the selected Team, except for 
 
 ### 10 km Stop Rule
 
-- A Team targeting a non-Power-Up token stops when it is within 10 km of that target.
-- The target is also treated as stopped for the relevant movement calculation.
-- Opposing Teams are stopped when their planned paths come within 10 km of one another, preventing them from passing through each other.
-- Power Up targets are exempt from this stop rule so Teams can reach and collect them.
+- An existing distance of 10 km or less does not generally block the next advance. Teams are planned even when they begin an operation near a Player or Power Up.
+- During movement, a Team stops at the first point where its planned path comes within 10 km of any active token. Eliminated tokens are excluded.
+- When the encountered token is a Team, the Team pair is recorded for collision resolution. If a Team still targets that nearby Team at the start of an operation, the existing proximity is treated as an immediate Team encounter so they can fight again without needing to separate first.
+- When the encountered token is a Power Up, the Team stops and collects it.
+- When the encountered token is a Player, the Team simply stops nearby. The Player does not move or participate in collision resolution.
+- Moving Team targets are stopped at the same encounter time so opposing Teams cannot pass through one another.
 
 ### Advance Teams Collisions
 
 For simultaneous movement:
 
-1. The planner records Team pairs whose movement paths come within 10 km.
+1. The planner records Team pairs whose movement paths come within 10 km of one another, including an immediate encounter when a Team still targets a nearby Team.
 2. Connected collision groups are resolved as one component.
-3. One Team is selected uniformly at random as the winner for each component.
-4. Every other Team in that component becomes an `Eliminated` token.
-5. Collision losers are committed at their collision-stop positions, preserving their movement trajectory and Power Up inventory.
-6. The winning Team gains one `Elimination Power Up` for each Team it eliminates in that collision component.
-7. The winning Team receives a new weighted-random target.
-8. Targets pointing to eliminated or collected tokens are cleared.
+3. Each collision component has a 50% chance for every Team in it to survive. The surviving Teams are committed at their collision-stop positions, receive new weighted-random targets, and do not receive elimination Power Ups. Their stop applies only to that operation; on the next **Advance Teams**, they are eligible to move or fight again. If they still target one another, the collision rules are resolved again immediately when the next operation is planned.
+4. Otherwise, one Team is selected uniformly at random as the winner for the component.
+5. Every other Team in that component becomes an `Eliminated` token.
+6. Collision losers are committed at their collision-stop positions, preserving their movement trajectory and Power Up inventory.
+7. The winning Team gains one `Elimination Power Up` for each Team it eliminates in that collision component.
+8. The winning Team receives a new weighted-random target.
+9. Targets pointing to eliminated or collected tokens are cleared.
 
 Eliminated tokens remain stored and visible unless **Hide Eliminated** is enabled. They cannot move, be dragged, targeted, or selected as automatic targets.
 
 ### Selected-Team Collisions
 
-When the selected Team reaches a Team target during the selected-token Advance action:
+When the selected Team encounters another Team within 10 km during the selected-token Advance action:
 
 1. One of the two Teams is chosen at random as the winner.
 2. The losing Team becomes `Eliminated`.
@@ -156,7 +158,7 @@ When the selected Team reaches a Team target during the selected-token Advance a
 
 ## Power Up Collection
 
-When a Team reaches a Power Up target:
+When a Team comes within 10 km of a Power Up during movement:
 
 - The Team's movement and collection are committed atomically.
 - The Power Up token is removed from the active token list.

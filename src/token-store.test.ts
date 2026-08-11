@@ -49,6 +49,24 @@ describe('TokenStore', () => {
     expect(reloadedStore.list()).toEqual([token])
   })
 
+  it('undoes and redoes writes while discarding redo history after a new write', () => {
+    const store = new TokenStore(new MemoryStorage())
+    const token = store.create('North star', { longitude: 12, latitude: 48 })
+    store.rename(token.id, 'South star')
+
+    expect(store.canUndo()).toBe(true)
+    expect(store.undo()).toBe(true)
+    expect(store.list()[0]?.name).toBe('North star')
+    expect(store.canRedo()).toBe(true)
+    expect(store.redo()).toBe(true)
+    expect(store.list()[0]?.name).toBe('South star')
+
+    expect(store.undo()).toBe(true)
+    store.setNotes(token.id, 'Replacement write')
+    expect(store.canRedo()).toBe(false)
+    expect(store.redo()).toBe(false)
+  })
+
   it('creates and persists multiple token seeds in one batch', () => {
     const storage = new MemoryStorage()
     const store = new TokenStore(storage)
@@ -156,6 +174,17 @@ describe('TokenStore', () => {
       'Map',
       'Power Up 1',
     ])
+
+    const encounteredPowerUp = store.create(
+      'Power Up 2',
+      { longitude: 1.1, latitude: 1.1 },
+      undefined,
+      TokenType.PowerUp,
+    )
+    expect(store.moveMany(
+      [{ id: team.id, coordinates: encounteredPowerUp }],
+      [{ teamId: team.id, powerUpId: encounteredPowerUp.id }],
+    )[0]?.powerUps).toEqual(['Shield', 'Map', 'Power Up 1', 'Power Up 2'])
     expect(() => store.setPowerUps(player.id, [])).toThrow('Only Team')
   })
 
