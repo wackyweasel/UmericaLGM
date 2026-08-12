@@ -22,6 +22,10 @@ class MemoryStorage implements StorageLike {
     this.values.set(key, value)
   }
 
+  removeItem(key: string): void {
+    this.values.delete(key)
+  }
+
   seed(key: string, value: string): void {
     this.values.set(key, value)
   }
@@ -509,6 +513,20 @@ describe('TokenStore', () => {
 
     store.remove(token.id)
     expect(store.list()).toEqual([])
+  })
+
+  it('resets tokens and removes only its persisted data', () => {
+    const storage = new MemoryStorage()
+    storage.seed('unrelated.preference', 'kept')
+    const store = new TokenStore(storage)
+    store.create('Old match token', { longitude: 0, latitude: 0 })
+
+    store.reset()
+
+    expect(store.list()).toEqual([])
+    expect(store.canUndo()).toBe(false)
+    expect(new TokenStore(storage).list()).toEqual([])
+    expect(storage.getItem('unrelated.preference')).toBe('kept')
   })
 
   it('fails closed for malformed or schema-invalid cached data', () => {

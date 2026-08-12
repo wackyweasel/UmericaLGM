@@ -1107,9 +1107,10 @@ function startNewMatch(teamCount: number, powerUpCount: number): void {
   }
 
   try {
-    window.localStorage.clear()
-    tokenStore.clear()
+    tokenStore.reset()
     clearStoredMapView()
+    window.localStorage.removeItem(MATCH_DAY_STORAGE_KEY)
+    window.localStorage.removeItem(ELIMINATION_TIMELINE_STORAGE_KEY)
     currentMatchDay = 0
     eliminationEvents = []
     storeMatchDay(currentMatchDay)
@@ -1212,8 +1213,11 @@ function eraseLocalData(): void {
   }
 
   try {
-    tokenStore.clear()
+    tokenStore.reset()
     clearStoredMapView()
+    window.localStorage.removeItem(THEME_STORAGE_KEY)
+    window.localStorage.removeItem(MATCH_DAY_STORAGE_KEY)
+    window.localStorage.removeItem(ELIMINATION_TIMELINE_STORAGE_KEY)
     window.location.reload()
   } catch (error) {
     showActivity(getErrorMessage(error), true)

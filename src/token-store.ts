@@ -85,6 +85,7 @@ interface TransferToken extends Coordinates {
 export interface StorageLike {
   getItem(key: string): string | null
   setItem(key: string, value: string): void
+  removeItem(key: string): void
 }
 
 export interface PowerUpCollection {
@@ -396,6 +397,18 @@ export class TokenStore {
 
   clear(): void {
     this.commit([])
+  }
+
+  reset(): void {
+    const hadTokens = this.tokens.length > 0
+    this.storage.removeItem(this.storageKey)
+    this.tokens = []
+    this.undoStack = []
+    this.redoStack = []
+
+    if (hadTokens) {
+      this.notify()
+    }
   }
 
   moveMany(
