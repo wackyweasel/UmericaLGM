@@ -5,6 +5,7 @@ import {
   hasNearbyTeamWithinSpeed,
   isTargetWithinRank,
   selectPowerUpCity,
+  selectNearbyPlayerTarget,
   selectTeamsForPowerUpRetarget,
   selectTargetToken,
   shouldReselectTarget,
@@ -174,6 +175,39 @@ describe('Power Up city selection', () => {
   it('uses the fixed 10% target-reselection chance', () => {
     expect(shouldReselectTarget(() => 0.09)).toBe(true)
     expect(shouldReselectTarget(() => 0.1)).toBe(false)
+  })
+
+  it('retargets to a nearby Player when the current target is beyond Team speed', () => {
+    const source = {
+      id: 'source',
+      name: 'Source',
+      longitude: 0,
+      latitude: 0,
+      speed: 250,
+      targetTokenId: 'far-target',
+      type: TokenType.Team,
+    }
+    const nearbyPlayer = {
+      id: 'nearby-player',
+      name: 'Nearby Player',
+      longitude: 1,
+      latitude: 0,
+      type: TokenType.Player,
+    }
+    const farTarget = {
+      id: 'far-target',
+      name: 'Far Target',
+      longitude: 3,
+      latitude: 0,
+      type: TokenType.PowerUp,
+    }
+    const tokens = [source, nearbyPlayer, farTarget]
+
+    expect(selectNearbyPlayerTarget(source, tokens, () => 0.49)?.id).toBe(nearbyPlayer.id)
+    expect(selectNearbyPlayerTarget(source, tokens, () => 0.5)).toBeUndefined()
+    expect(selectNearbyPlayerTarget({ ...source, targetTokenId: nearbyPlayer.id }, tokens, () => 0))
+      .toBeUndefined()
+    expect(selectNearbyPlayerTarget({ ...source, speed: 100 }, tokens, () => 0)).toBeUndefined()
   })
 
   it('uses the fixed 10% Power Up usage chance', () => {

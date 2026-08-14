@@ -46,6 +46,13 @@ Target preparation happens before movement planning for both **Advance** and **A
 - The Team may select the same target again.
 - The target-selection checks happen even if a Team later fails the 50% movement check.
 
+### Nearby Player Retargeting
+
+- After random reselection, a Team whose current target is farther away than its configured speed checks for Player tokens closer than that speed in great-circle distance.
+- When one or more Players qualify, the closest qualifying Player has a 50% chance to become the Team's new target.
+- Distances exactly equal to the Team's speed do not qualify for either condition.
+- This check applies to every Team during both the selected-token Advance action and Advance Teams, even when that Team later fails the 50% movement check.
+
 ### Power Up Use
 
 - On every Advance operation, a Team with at least one inventory Power Up has an independent 10% chance of using one only when at least one other active Team is within that Team's configured speed in great-circle distance.
@@ -77,7 +84,7 @@ The three closest tokens are ranked by great-circle distance. The new Power Up d
 
 ### 1. Prepare Targets
 
-The app assigns required targetless Teams, applies the independent 10% reselection checks, and enforces closest-Power-Up targeting.
+The app assigns required targetless Teams, applies the independent 10% reselection checks, applies nearby-Player retargeting, and enforces closest-Power-Up targeting.
 
 ### 2. Identify Movable Teams
 

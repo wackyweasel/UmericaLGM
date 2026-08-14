@@ -25,6 +25,7 @@ import {
   getNextPowerUpName,
   hasNearbyTeamWithinSpeed,
   selectPowerUpCity,
+  selectNearbyPlayerTarget,
   selectTeamsForPowerUpRetarget,
   selectTargetToken,
   shouldReselectTarget,
@@ -1596,6 +1597,19 @@ function prepareAdvanceTargets(targetlessTeamIds: readonly string[]): {
     const previousTargetId = tokens.find((token) => token.id === teamId)?.targetTokenId
     const target = retargetTeam(teamId)
     if (target?.id !== previousTargetId) {
+      targetChangeCount += 1
+    }
+  }
+
+  tokens = tokenStore.list()
+  for (const team of tokens) {
+    if (team.type !== TokenType.Team || !team.targetTokenId) {
+      continue
+    }
+
+    const nearbyPlayer = selectNearbyPlayerTarget(team, tokens)
+    if (nearbyPlayer && nearbyPlayer.id !== team.targetTokenId) {
+      tokenStore.setTarget(team.id, nearbyPlayer.id)
       targetChangeCount += 1
     }
   }

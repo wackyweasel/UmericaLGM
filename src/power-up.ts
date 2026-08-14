@@ -8,6 +8,7 @@ const TEAM_TARGET_LOCK_POWER_UP_COUNT = 3
 const POWER_UP_SPAWN_SWITCH_PROBABILITY = 0.5
 const RANDOM_TARGET_RESELECTION_PROBABILITY = 0.1
 const POWER_UP_USE_PROBABILITY = 0.1
+const NEARBY_PLAYER_RETARGET_PROBABILITY = 0.5
 
 export type TargetSelectionToken = Pick<Token, 'id' | 'name' | 'longitude' | 'latitude'> & {
   type?: Token['type']
@@ -44,6 +45,26 @@ export function hasNearbyTeamWithinSpeed(
     token.type === TokenType.Team &&
     greatCircleDistance(sourceTeam, token) <= sourceTeam.speed
   ))
+}
+
+export function selectNearbyPlayerTarget(
+  sourceTeam: Pick<Token, 'id' | 'name' | 'targetTokenId' | 'longitude' | 'latitude' | 'speed'>,
+  tokens: readonly TargetSelectionToken[],
+  random = Math.random,
+): TargetSelectionToken | undefined {
+  const currentTarget = tokens.find((token) => token.id === sourceTeam.targetTokenId)
+  if (!currentTarget || greatCircleDistance(sourceTeam, currentTarget) <= sourceTeam.speed) {
+    return undefined
+  }
+
+  const nearbyPlayer = rankTargetTokens(sourceTeam, tokens)
+    .find(({ token, distance }) => token.type === TokenType.Player && distance < sourceTeam.speed)
+    ?.token
+  if (!nearbyPlayer || random() >= NEARBY_PLAYER_RETARGET_PROBABILITY) {
+    return undefined
+  }
+
+  return nearbyPlayer
 }
 
 export function getClosestPowerUpTarget(
